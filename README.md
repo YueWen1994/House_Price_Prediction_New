@@ -1,5 +1,5 @@
 # House_Price_Prediction
-This repo contains two three file
+This repo contains 
 
 1)lib
    
