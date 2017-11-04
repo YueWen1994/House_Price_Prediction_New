@@ -1,0 +1,606 @@
+---
+title: "zillow project --- tree based model"
+author: "YueWen"
+output: pdf_document
+---
+## Missing data imputation
+
+In previous work, we have finsihed missing data imputation, so all the data is complete, and here we import the imputated data directly from preveious work.
+```{r,warning=FALSE,message=FALSE}
+setwd("D:/data_camp/zillow_project")
+#this csv is derived by imputation_part2.R 
+train <- read.csv('train_imputed2.csv', stringsAsFactors = F)
+```
+## Feture engineering
+However, regard to  the feature engineering part. We made several changes to tailor the need for tree-based methods.
+
+1) Change build year to  numerical type,  and impute the missing value by randomly sampling. The practice can be validated by two reasons: the first is that built-year is not strong related to other features, so we might don't want to use mice to impute it. The second is that for tree based method, built-year will have more power as numerical value.
+
+2) For interacttion terms, we create it in this part because I  don't  know how to include them in the formula for tree based methods
+
+3) For other feature engineering part, we use the same collpase techinique and generate the same new features as in what we did in linaer model. However, we will delete all the ananlysis part for generating new  features,  such as  t-test, correlaton analysis.
+
+### Handle variable type
+```{r,warning=FALSE,message=FALSE}
+train <- train[,!names(train) %in%c("X.1","X","trans_year")]
+
+variable_numeric = c("area_firstfloor_finished",
+                     "area_base", "area_base_living",
+                     "area_garage", 
+                     "area_live_finished",
+                     "area_liveperi_finished",
+                     "area_lot",
+                     "area_patio",
+                     "area_pool",
+                     "area_shed",
+                     "area_total_calc",
+                     "area_total_finished",
+                     "area_unknown",
+                     "tax_building",
+                     "tax_land",
+                     "tax_property",
+                     "tax_total",
+                     "latitude",
+                     "longitude")
+# discrete
+variable_discrete = c("num_75_bath",
+                      "num_bath",
+                      "num_bathroom",
+                      "num_bathroom_calc",
+                      "num_bedroom",
+                      "num_fireplace",
+                      "num_garage",
+                      "num_pool",
+                      "num_room",
+                      "num_story",
+                      "num_unit")
+variable_binary = c("flag_fireplace",
+                    "flag_tub",
+                    "flag_spa",
+                    "flag_pool_spa",
+                    "flag_pool_tub",
+                    "tax_delinquency")
+
+# categorical variable
+variable_nominal = c("aircon",
+                     "architectural_style",
+                     "county",
+                     "deck",
+                     "framing",
+                     "heating",
+                     "id_parcel",
+                     "material",
+                     "region_city",
+                     "region_county",
+                     "region_neighbor",
+                     "region_zip",
+                     "story",
+                     "zoning_landuse",
+                     "zoning_landuse_county")
+variable_ordinal = c("quality")
+
+# date
+variable_date = c("tax_year",
+                  "build_year",
+                  "tax_delinquency_year",
+                  "trans_year",
+                  "trans_month",
+                  "trans_day",
+                  "trans_date",
+                  "trans_weekday")
+
+# others
+variable_unstruct = c("zoning_property")
+
+# don't understand
+variable_unknown = c('censustractandblock',
+                     'rawcensustractandblock')
+
+
+# Conversion
+# - convert some binary to 0, 1
+# - convert to date to int
+# - convert to numeric to double
+# - convert to discrete to int
+# - convert to categorical to character
+train[train$flag_fireplace == "", "flag_fireplace"] = 0
+train[train$flag_fireplace == "true", "flag_fireplace"] = 1
+train[train$flag_tub == "", "flag_tub"] = 0
+train[train$flag_tub == "true", "flag_tub"] = 1
+train[train$tax_delinquency == "", "tax_delinquency"] = 0
+train[train$tax_delinquency == "Y", "tax_delinquency"] = 1
+# convert to date to int
+train[,variable_date[variable_date %in% names(train)]] = 
+  sapply(train[,variable_date[variable_date %in% names(train)]], as.character)
+# convert to numeric to double
+train[,variable_numeric[variable_numeric %in% names(train)]] = 
+  sapply(train[,variable_numeric[variable_numeric %in% names(train)]], as.numeric)
+# convert to discrete to int
+combine_int_col = c(variable_discrete, variable_binary)
+train[,combine_int_col[combine_int_col %in% names(train)]] = 
+  sapply(train[,combine_int_col[combine_int_col %in% names(train)]], as.integer)
+# convert to categorical to character
+combine_char_col =  c(variable_nominal, variable_ordinal)
+train[,combine_char_col[combine_char_col %in% names(train)]] = 
+  sapply(train[,combine_char_col[combine_char_col %in% names(train)]], as.character)
+```
+
+### date related feature
+```{r,echo = FALSE, warning=FALSE,message=FALSE}
+#here we simply sample build_year
+train$build_year = as.numeric(train$build_year)
+set.seed(500)
+train$build_year[is.na(train$build_year)] <- sample(train$build_year[!is.na(train$build_year)],
+                                                     nrow(subset(train,is.na(train$build_year))))
+# in tree's model, we use build year as numerical variable.
+#and randomly sample the missing value 
+date.feature <- c("build_year")
+```
+
+### roomcnt realted feature
+```{r,echo = FALSE, warning=FALSE,message=FALSE}
+#roomcnt
+###
+#t.test shows it does matter to have right room number, so  crate a new level
+train$right_room <- with(train,ifelse(num_room >= num_bedroom + num_bathroom,1,0))
+train$bed_to_bath <- with(train,ifelse(num_bathroom == 0, 0,num_bedroom/num_bathroom))
+train$are_per_room<- with(train,ifelse(num_room == 0, 0, area_total_calc/num_room))
+train$zero_room <- with(train, ifelse(num_room  ==0 ,1,0))
+
+room.area.feature <- c("num_room","num_bedroom","num_bathroom","right_room","bed_to_bath",
+                       "are_per_room","zero_room","area_total_calc")
+
+```
+
+### equipment
+```{r,echo = FALSE, warning=FALSE,message=FALSE}
+#rebuild level based on mean  log_error
+train$new.aircon = with(train,ifelse(aircon=="missing",aircon,
+                                     ifelse(aircon=="5"|aircon=="13","5/13",
+                                            ifelse(aircon=="11","11","1/3/9"))))
+
+train$new.heating = with(train,ifelse(heating == "missing",heating,
+                                      ifelse(heating %in% c("10","11","12","13","14","20","24"),"neg",
+                                             ifelse(heating %in% c("6","7"),"6/7","2/1/18"))))
+train$missing.heating <- with(train,ifelse(heating == "missing",1,0))
+train$missing.aircon <- with(train,ifelse(aircon == "missing",1,0))
+train$heating.and.tub <- train$missing.aircon * train$missing.heating
+facility.feature <- c("flag_fireplace","heating.and.tub","new.heating")
+```
+
+### tax
+```{r,echo = FALSE, warning=FALSE,message=FALSE}
+train$tax.perc <- train$tax_property/ train$tax_total
+train$right.tax <-ifelse(train$tax.perc < 0.1,1,0)
+train$build.to.total <- train$tax_building/train$tax_total
+train$tax.per.area <-  train$tax_property/train$area_total_calc
+tax.feature <- c("tax_delinquency","tax_total","tax_property","tax_land","right.tax","tax.per.area","build.to.total","tax.perc")
+```
+
+### quality
+```{r,echo = FALSE, warning=FALSE,message=FALSE}
+quality.error <- by(train,train$quality, function(x){mean(x$logerror)})
+train$new.quality <- with(train,ifelse(quality=="missing",quality,
+                                       ifelse(quality %in% c("12","7","11"),"12-7-11",
+                                              ifelse(quality %in% c("4","1"), "4-1","6-8-10")
+                                       )
+                                       
+))
+
+quality.feature <- c("new.quality")
+```
+
+### geo_info
+```{r,echo = FALSE, warning=FALSE,message=FALSE}
+zip.num <- by(train, train$region_zip, function(x) nrow(x))
+train$zip.num <- zip.num[train$region_zip]
+zip.area  <- by(train, train$region_zip, function(x) 
+{abs((max(x$longitude) - min(x$longitude))*(max(x$latitude) - min(x$latitude)))})
+train$zip.area <- zip.area[train$region_zip]
+
+zip.density <- ifelse(zip.area  == 0 , 0 ,zip.num/zip.area)
+zip.density.accuracy <- ifelse(zip.num>50,1,0)
+zip.density.revised  <- zip.density*zip.density.accuracy
+train$zip.density.revised <- zip.density.revised[train$region_zip]
+
+train$zip.density <- zip.density[train$region_zip]
+
+city.zip <- by(train,train$region_city, function(x){length(unique(x$region_zip))})
+train$zip.per.city <- city.zip[train$region_city]
+city.area <- by(train, train$region_city, function(x){abs((max(x$longitude) - min(x$longitude))*(max(x$latitude) - min(x$latitude)))})
+city.num  <- by(train, train$region_city, function(x) nrow(x))
+city.density <- city.area/city.num
+train$city.density <- city.density[train$region_city]
+train$county6111 <- with(train, ifelse(county == "6111",1,0))
+geo.feature<- c("county6111","zip.density.revised")
+```
+
+### combine all  the selected features
+```{r,echo = FALSE, warning=FALSE,message=FALSE}
+selected.feature <- c("logerror",geo.feature,quality.feature,tax.feature,facility.feature,room.area.feature,date.feature)
+```
+
+## tree models
+From here, we start to build tree models based  on the missing value imputation part as well as the feature engineering part. This part is structured into three sections.
+
+1) Basic tree exploartion
+
+2) Random Forest
+
+3) Boosting tree
+
+###Prepare work
+This part we  split train and test set, and then generate the formula. Let us take a look at the formula we generated. 
+
+```{r, warning=FALSE,message=FALSE}
+tree.df <- train[,selected.feature]
+
+# train/test split
+set.seed(500)
+train.ind <- sample(nrow(tree.df),0.7*nrow(tree.df))
+train.set <- tree.df[train.ind,]
+test.set <- tree.df[-train.ind,]
+
+##tree method
+x_formula <- paste(names(train.set[,-1]),collapse = "+")
+formula  <- as.formula(paste("logerror~",x_formula))
+print(formula)
+```
+
+###1. Simple tree method
+```{r, warning=FALSE,message=FALSE}
+library(rpart)
+# step1 
+# it takes a little bit long to run, save it and import it directly
+#tree0 <- rpart(formula, data = train.set, control = rpart.control(cp= 0.0001))
+#save("tree0",file = "tree0.RData")
+load("tree0.RData")
+printcp(tree0)
+plotcp(tree0)
+#step  2: pick up the tree size that minimizes the c-v error
+#we can see cross  validation error increases first and then decreases
+# therefore, let us choose the best control paramter 
+bestcp <- tree0$cptable[which.min(tree0$cptable[,"xerror"]),"CP"]
+
+#step 3: prune the tree with best cp
+tree0.pruned <- prune(tree0,cp = bestcp)
+
+#calculate mse
+test.pred <- predict(tree0.pruned,newdata = test.set)
+tree0.mse <- sum((test.pred - test.set$logerror)^2)/length(test.pred)
+print(tree0.mse)
+```
+
+The result is slightly better than random guessing. Let us plot the tree and then try other method to see whether it improved  the result.
+```{r, warning=FALSE,message=FALSE}
+plot(tree0.pruned)
+plot(tree0.pruned, uniform = T)
+text(tree0.pruned, cex = 0.8, use.n = TRUE, xpd = TRUE)
+library(rpart.plot)
+prp(tree0.pruned, faclen = 0, cex = 0.8)
+```
+We can see the tree only splited  once in this case.
+
+
+###2.Random Forest
+```{r, warning=FALSE,message=FALSE}
+library(randomForest)
+#we can use the same formula we used before
+#just a reminder of what we features we selected
+factor.feature <- c("new.quality","new.heating")
+train.set$new.heating <- as.factor(train.set$new.heating)
+train.set$new.quality <- as.factor(train.set$new.quality)
+test.set$new.heating <- as.factor(test.set$new.heating)
+test.set$new.quality <- as.factor(test.set$new.quality)
+```
+
+we use the default ntree = 50 for now to see the initial result
+and it takes forever to run, we save  it as Rdata and import it directly 
+```{r, warning=FALSE,message=FALSE}
+# rf <- randomForest(formula,data = train.set,importance = TRUE, ntree = 50)
+# save("rf",file="rf.RData")
+load("rf.RData")
+varImpPlot(rf,type = 1)
+```
+
+Let us interpret the result of  random forest, we only use the  increase mse  plot. 
+
+As we can see, build_year is the most important feature here, and tax.percentage is still an important feature, as showned in the pruned tree.
+
+This is  different from linear model. Flag_fireplace is still not important features, which  is the
+same as in linear model.
+
+We pick up the most important two features, to see how they influence the logerror. It took too long to run as as well, we save it as image and import them directyly.
+
+```{r, warning=FALSE,message=FALSE}
+
+#partialPlot(rf, train.set, eval('build_year'), xlab='build_year')
+
+```
+
+![partial plot](partial_plot_built_year.png)
+
+
+
+The plots are very hard to interpret, but basically we can see there is not linear relationship with the response, it seemes  more  like a quadratic relationship.
+```{r, warning=FALSE,message=FALSE}
+plot(rf) # see oob error
+```
+We can see the  out of bag error decreases as the number  of trees increase, and 30 seems to be a knee point for this curve, which make it a reasonable numbe for the number of tree.
+
+Then let us calculate  MSE for rfmodel.
+```{r, warning=FALSE,message=FALSE}
+rf.pred <- predict(rf,test.set)
+rf.mse <- mean((rf.pred- test.set$logerror)^2)
+print(rf.mse)
+```
+rf.mse is even worse then the base tree model, which is very disappointing given the fact that it took almost one hour to run. However, let us move on to xgboosting for now.
+
+
+### 3.xgboosting
+This part, we are trying to build a simple model without selecting paramters first, later we will perform grid search.
+```{r, warning=FALSE,message=FALSE}
+library(xgboost)
+xgboost.train.label <- train.set$logerror
+xgboost.test.label <- test.set$logerror
+
+xgboost.feature.matrix <- model.matrix(~.,data = train.set[,-1])
+set.seed(1)
+
+# gbt <- xgboost(data = xgboost.feature.matrix,
+#                label = xgboost.train.label,
+#                max_depth = 10,
+#                nround = 50,
+#                objective = "reg:linear",
+#                verbose = 2)
+#save("gbt",file = "gbt.RData")
+load("gbt.RData")
+```
+
+Then let us take a look at importance
+```{r, warning=FALSE,message=FALSE}
+importance <- xgb.importance(feature_names = colnames(xgboost.feature.matrix), model = gbt)
+importance
+library(Ckmeans.1d.dp)
+xgb.plot.importance(importance)
+```
+
+We can see, here, we still use gain to measure the importance feature.
+tax_toal, zip.density.rivised, tax.perc  are  important features.
+And as we recall in the random forest model, they are important features there
+as well, just the order of importance might change a little bit here.
+
+Then let us  choose parameters to find the optimal number of tree.
+```{r, warning=FALSE,message=FALSE}
+par <- list( max_depth = 8,
+             objective = "reg:linear",
+             nthread = 3,
+             verbose = 2)
+# gbt.cv <- xgb.cv(params = par,
+#                  data = xgboost.feature.matrix, label = xgboost.train.label,
+#                  nfold = 5, nrounds = 100)
+# save("gbt.cv",file  =  "gbt.cv.RData")
+load("gbt.cv.RData")
+plot(gbt.cv$evaluation_log$train_rmse_mean, type = 'l')
+lines(gbt.cv$evaluation_log$test_rmse_mean, col = 'red')
+```
+We can  see when the number of  tree is bigger than 10, the performance of the model does  not improve anymore.  Again, we can see the bias-variance trade off here.
+```{r, warning=FALSE,message=FALSE}
+nround = which(gbt.cv$evaluation_log$test_rmse_mean == min(gbt.cv$evaluation_log$test_rmse_mean)) 
+print(paste("the best number of  tree is : ",nround))
+
+# then let us fit the model again using the best parameter when n =12
+best.tree.gbt <- xgboost(data = xgboost.feature.matrix, 
+               label = xgboost.train.label,
+               nround = nround,
+               params = par)
+
+# to compare with other methods, let us calculate the mse
+best.tree.gbt.pred <- predict(best.tree.gbt, model.matrix(~.,data = test.set[,-1]))
+best.tree.gbt.mse  <- mean((best.tree.gbt.pred - test.set$logerror)^2)
+print(best.tree.gbt.mse)
+```
+The error is slightly smaller than random forest, bigger than simple tree method, which is very disappointig again.
+
+However, it is not sufficient only to choose only one number of trees, let us use grid search to search the optimal parameters.
+
+
+#### grid searching for boosting
+
+Noticed that here rmse is used to choose the best parameter.
+```{r, warning=FALSE,message=FALSE}
+# all_param = NULL
+# all_test_rmse = NULL
+# all_train_rmse = NULL
+# 
+# ######  Takes too long to run, take it out! only save the best paramter
+# for (iter in 1:20) {
+#   print(paste("-------", iter,"-------"))
+# 
+#   param <- list(objective = "reg:linear",
+#                 max_depth = sample(5:12, 1),
+#                 subsample = runif(1, .6, .9),
+#                 colsample_bytree = runif(1, .5, .8),
+#                 eta = runif(1, .01, .3),
+#                 gamma = runif(1, 0.0, 0.2),
+#                 min_child_weight = sample(1:40, 1),
+#                 max_delta_step = sample(1:10, 1)
+#   )
+#   cv.nround = 30
+#   cv.nfold = 5
+#   seed.number = sample.int(10000, 1)[[1]]
+#   set.seed(seed.number)
+#   mdcv <- xgb.cv(data=xgboost.feature.matrix,
+#                  label = xgboost.train.label,
+#                  params = param,
+#                  nfold=cv.nfold,
+#                  nrounds=cv.nround,
+#                  #metrics = "mae",
+#                  early_stopping_rounds = 10,
+#                  maximize=FALSE)
+#   min_train_rmse = min(mdcv$evaluation_log$train_rmse_mean)
+#   min_test_rmse = min(mdcv$evaluation_log$test_rmse_mean)
+# 
+#   all_param <- rbind(all_param, unlist(param)[-1])
+#   all_train_rmse <- c(all_train_rmse, min_train_rmse)
+#   all_test_rmse <- c(all_test_rmse, min_test_rmse)
+# }
+# 
+# all_param <- as.data.frame(all_param)
+# save("all_param", file = "all_param.RData")
+# save("all_train_rmse", file = "all_train_rmse.RData")
+# save("all_test_rmse", file = "all_test_rmse.RData")
+
+load("all_param.RData")
+load("all_train_rmse.RData")
+load("all_test_rmse.RData")
+best_param <- all_param[which(all_test_rmse == min(all_test_rmse)), ]
+# grid.search.gbt <- xgboost(data =  xgboost.feature.matrix, 
+#                label = xgboost.train.label, 
+#                params = best_param,
+#                nrounds=100,
+#                early_stopping_rounds = 10,
+#                maximize = FALSE)
+# save("grid.search.gbt",file = "grid.search.gbt.RData")
+load("grid.search.gbt.RData")
+# prediction
+grid.search.pred <- predict(grid.search.gbt, model.matrix(~.,data = test.set[,-1]))
+boost.mse <- mean((grid.search.pred - test.set$logerror)^2)
+print(boost.mse)
+
+```
+As we can see, our model is now slightlt better  than simple tree model, then  let us attempt to improve it.
+
+We keep the same parameter as before to save time... 
+
+#### improvement attempt 1 : reduce useless features 
+Let us take a look at the importance, and then drop the redundant feature to
+see whether the results are improved.
+```{r, warning = FALSE, message = FALSE }
+importance <- xgb.importance(feature_names = colnames(train.set), model = grid.search.gbt)
+xgb.plot.importance(importance, top_n = 10)
+trunc.feature <- xgb.plot.importance(importance, top_n = 10)$Feature
+mod.data <- tree.df[,trunc.feature]
+
+mod.data.train <- mod.data [train.ind,]
+mod.data.test <-  mod.data [-train.ind,]
+mod.feature.matrix <- model.matrix(~., data = mod.data.train)
+mod.feature.test.matrix <- model.matrix(~., data = mod.data.test)
+mod.train.label <- tree.df[train.ind,]$logerror
+mod.test.label <- tree.df[-train.ind,]$logerror
+mod.gbt <- xgboost(data =  mod.feature.matrix, 
+               label = mod.train.label, 
+               params = best_param,
+               nrounds=30,
+               early_stopping_rounds = 10,
+               maximize = FALSE)
+mod.pred <- predict(mod.gbt,mod.feature.test.matrix)
+mod.mse <- mean((mod.pred -mod.test.label )^2)
+print(paste("reduced  feature(10) mse:",mod.mse,"compared to original mse",boost.mse))
+
+```
+
+Almost the same, then let us reduce the feature to 5 to see the result, note: it is better use cross validation here to choose number of features slected. However, this is just an intuitive attemp.
+```{r, warning = FALSE, message = FALSE }
+importance <- xgb.importance(feature_names = colnames(train.set), model = grid.search.gbt)
+xgb.plot.importance(importance, top_n = 5)
+trunc.feature <- xgb.plot.importance(importance, top_n = 5)$Feature
+mod.data <- tree.df[,trunc.feature]
+
+mod.data.train <- mod.data [train.ind,]
+mod.data.test <-  mod.data [-train.ind,]
+mod.feature.matrix <- model.matrix(~., data = mod.data.train)
+mod.feature.test.matrix <- model.matrix(~., data = mod.data.test)
+mod.train.label <- tree.df[train.ind,]$logerror
+mod.test.label <- tree.df[-train.ind,]$logerror
+mod.gbt <- xgboost(data =  mod.feature.matrix, 
+               label = mod.train.label, 
+               params = best_param,
+               nrounds=30,
+               early_stopping_rounds = 10,
+               maximize = FALSE)
+mod.pred <- predict(mod.gbt,mod.feature.test.matrix)
+mod.mse <- mean((mod.pred -mod.test.label )^2)
+print(paste("reduced  feature(5) mse:",mod.mse,"compared to original mse",boost.mse))
+
+```
+This is worse, it seems like 10 is better  than 5.
+
+#### improvement attempt 2 : reduce logerror outlier 
+```{r, warning = FALSE, message = FALSE }
+up.bound <- quantile(train.set$logerror, 0.9)
+low.bound <- quantile(train.set$logerror,0.1)
+trunc.df <- subset(tree.df,  tree.df$logerror < up.bound 
+                                & tree.df$logerror >low.bound)
+trunc.feature <- xgb.plot.importance(importance, top_n = 10)$Feature
+
+mod.data <- trunc.df[,trunc.feature]
+set.seed(1)
+train.ind.trunc <- sample(1:nrow(mod.data),0.7*nrow(mod.data))
+
+mod.data.train <- mod.data [train.ind.trunc ,]
+mod.data.test <-  tree.df [-train.ind.trunc,trunc.feature]
+mod.feature.matrix <- model.matrix(~., data = mod.data.train)
+mod.feature.test.matrix <- model.matrix(~., data = mod.data.test)
+mod.train.label <- trunc.df[train.ind.trunc,]$logerror
+mod.test.label <- tree.df[-train.ind.trunc,]$logerror
+mod.gbt <- xgboost(data =  mod.feature.matrix, 
+               label = mod.train.label, 
+               params = best_param,
+               nrounds=30,
+               early_stopping_rounds = 10,
+               maximize = FALSE)
+mod.pred <- predict(mod.gbt,mod.feature.test.matrix)
+mod.mse <- mean((mod.pred -mod.test.label )^2)
+print(paste("reduced outlier mse:",mod.mse,"compared to original mse",boost.mse))
+
+```
+An important note here:  we remove the outlier when building our model, however, when we test our reulst on test data set, we did mot remove the outlier because we can not use the infomation of response in the test set. So the result can be trusted in this case, which is better than before. 
+
+## Comparision with linear model
+Let us take a look at the whether our tree model is better than our linear model
+by calculating the MSE for linear model
+```{r, warning = FALSE, message = FALSE }
+geo.feature<- c("county6111","zip.density.revised")
+quality.feature <- c("new.quality")
+geo.feature<- c("county6111","zip.density.revised")
+tax.feature <- c("tax_delinquency","tax_total","tax_property","tax_land","right.tax","tax.per.area","build.to.total","tax.perc")
+facility.feature <- c("flag_tub","flag_fireplace","missing.aircon","new.heating")
+room.area.feature <- c("num_room","num_bedroom","num_bathroom","right_room","bed_to_bath",
+                       "are_per_room","zero_room","area_total_calc")
+
+selected.feature <- c("logerror",geo.feature,quality.feature,tax.feature,facility.feature,room.area.feature)
+reg.df <- train[,selected.feature]
+reg.df.train <- reg.df[train.ind,]
+reg.df.test <- reg.df[-train.ind,]
+
+mod <- lm(logerror~.-zip.density.revised +I((zip.density.revised)^(1/18))
+           -are_per_room + I(are_per_room^(1/15))
+           -county6111-new.quality
+           #-tax_land +I(tax_land^(1/2))
+           -tax_property + I(tax_property^(1/60))
+           -num_room 
+           -bed_to_bath + I((bed_to_bath)^(1/2))
+           -tax.per.area + I(tax.per.area^(1/50))
+           -flag_fireplace
+           -missing.aircon 
+           -tax.perc + I(tax.perc^(1/12))
+           -right.tax  
+           + right.tax:I(tax_land^(1/3))
+           +I(build.to.total^(1/60))
+          + flag_tub : new.heating
+          +right_room : zero_room
+          -flag_tub
+
+          ,data = reg.df.train)
+linear.model.pred <- predict( mod,data = reg.df[reg.df.test,])
+linear.model.mse <- mean((linear.model.pred - reg.df.test$logerror)^2)
+print(paste("Linear model mse is:",linear.model.mse))
+print(paste("compared  to our best tree model, of which mse is",mod.mse))
+```
+## Conclusion
+Overall, tree methods perform better than linear model. However, it takes forever to run random forest and xgboosting(grid search). Compared  to linear regression, these two methods are more complicated, so we  expected it to have a better performance. However, linear model is simple and easy to interpret compared to xgboost.
+
+## In the end
+This project contains an end to end project from data exploration,  data cleaning, feature engineering to build model. In general, it can be super frustraring project espeically when seeing the result is super bad at 4am in the morning. However, I got hands-on experience in missing data imputation, feature engineering as well as building tree-based model, which is very valuable for me. 
+

@@ -1,0 +1,717 @@
+---
+title: "Feature_Engineering2 & Linear.Model"
+author: "Yue Wen"
+output: pdf_document
+---
+This RMD file is about continue performing Feature engineering and build linear model to predict independent variable.
+
+## 1. Missing data imputation
+I will summarize what I  did:
+
+1) For tax/area related missing data, there is relationship between different tax featres, it works the same way for the area  feature. Therefore, we used  the related feature to impute the missing data by simple calculation.
+
+2) For zip code/city, what we  did here is to use longitude/latitude to find its nearest neighbor and  use the same zip/city.
+
+3) For the missing features that contains more then  80% NA, delete them.
+
+4) For categorical  features that contains a lot of NA, create new level missing.
+
+5) For total area, using library(mice) to impute.
+
+Because it takes long to run  the imputation part,  I save the result to the csv, and we don't evaluate the code below anymore. Instead, we directly import the CSV data generated.
+```{r,include=FALSE}
+setwd("D:/data_camp/zillow_project")
+#this csv is derived by imputation_part2.R 
+
+train <- read.csv('train_imputed2.csv', stringsAsFactors = F)
+train <- train[,!names(train) %in%c("X.1","X","trans_year")]
+
+variable_numeric = c("area_firstfloor_finished",
+                     "area_base", "area_base_living",
+                     "area_garage", 
+                     "area_live_finished",
+                     "area_liveperi_finished",
+                     "area_lot",
+                     "area_patio",
+                     "area_pool",
+                     "area_shed",
+                     "area_total_calc",
+                     "area_total_finished",
+                     "area_unknown",
+                     "tax_building",
+                     "tax_land",
+                     "tax_property",
+                     "tax_total",
+                     "latitude",
+                     "longitude")
+# discrete
+variable_discrete = c("num_75_bath",
+                      "num_bath",
+                      "num_bathroom",
+                      "num_bathroom_calc",
+                      "num_bedroom",
+                      "num_fireplace",
+                      "num_garage",
+                      "num_pool",
+                      "num_room",
+                      "num_story",
+                      "num_unit")
+variable_binary = c("flag_fireplace",
+                    "flag_tub",
+                    "flag_spa",
+                    "flag_pool_spa",
+                    "flag_pool_tub",
+                    "tax_delinquency")
+
+# categorical variable
+variable_nominal = c("aircon",
+                     "architectural_style",
+                     "county",
+                     "deck",
+                     "framing",
+                     "heating",
+                     "id_parcel",
+                     "material",
+                     "region_city",
+                     "region_county",
+                     "region_neighbor",
+                     "region_zip",
+                     "story",
+                     "zoning_landuse",
+                     "zoning_landuse_county")
+variable_ordinal = c("quality")
+
+# date
+variable_date = c("tax_year",
+                  "build_year",
+                  "tax_delinquency_year",
+                  "trans_year",
+                  "trans_month",
+                  "trans_day",
+                  "trans_date",
+                  "trans_weekday")
+
+# others
+variable_unstruct = c("zoning_property")
+
+# don't understand
+variable_unknown = c('censustractandblock',
+                     'rawcensustractandblock')
+
+# Conversion
+# - convert some binary to 0, 1
+# - convert to date to int
+# - convert to numeric to double
+# - convert to discrete to int
+# - convert to categorical to character
+train[train$flag_fireplace == "", "flag_fireplace"] = 0
+train[train$flag_fireplace == "true", "flag_fireplace"] = 1
+train[train$flag_tub == "", "flag_tub"] = 0
+train[train$flag_tub == "true", "flag_tub"] = 1
+train[train$tax_delinquency == "", "tax_delinquency"] = 0
+train[train$tax_delinquency == "Y", "tax_delinquency"] = 1
+# convert to date to int
+train[,variable_date[variable_date %in% names(train)]] = 
+  sapply(train[,variable_date[variable_date %in% names(train)]], as.character)
+# convert to numeric to double
+train[,variable_numeric[variable_numeric %in% names(train)]] = 
+  sapply(train[,variable_numeric[variable_numeric %in% names(train)]], as.numeric)
+# convert to discrete to int
+combine_int_col = c(variable_discrete, variable_binary)
+train[,combine_int_col[combine_int_col %in% names(train)]] = 
+  sapply(train[,combine_int_col[combine_int_col %in% names(train)]], as.integer)
+# convert to categorical to character
+combine_char_col =  c(variable_nominal, variable_ordinal)
+train[,combine_char_col[combine_char_col %in% names(train)]] = 
+  sapply(train[,combine_char_col[combine_char_col %in% names(train)]], as.character)
+```
+
+
+```{eval = FALSE}
+# 1. read/prepare data
+################################################################################
+setwd("D:/data_camp/zillow_project")
+train <- read.csv('train_property.csv', stringsAsFactors = F)
+train$trans_year <- sapply(strsplit(train$transactiondate, '-'), '[[', 1)
+train$trans_month <- sapply(strsplit(train$transactiondate, '-'), '[[', 2)
+train$trans_day <- sapply(strsplit(train$transactiondate, '-'), '[[', 3)
+train$trans_weekday <- weekdays(as.Date(train$transactiondate))
+train$trans_DATE <- as.Date(train$transactiondate)
+# train rename
+train <- plyr::rename(train,
+                      c("parcelid"="id_parcel",
+                        "transactiondate" = "trans_date",
+                        "yearbuilt" = "build_year",
+                        "basementsqft"="area_base_living",
+                        "yardbuildingsqft17"="area_patio",
+                        "yardbuildingsqft26"="area_shed",
+                        "poolsizesum"="area_pool",
+                        "lotsizesquarefeet"="area_lot",
+                        "garagetotalsqft"="area_garage",
+                        "finishedfloor1squarefeet" = "area_firstfloor_finished",
+                        "calculatedfinishedsquarefeet" = "area_total_calc",
+                        "finishedsquarefeet6" = "area_base",
+                        "finishedsquarefeet12" = "area_live_finished",
+                        "finishedsquarefeet13" = "area_liveperi_finished",
+                        "finishedsquarefeet15" = "area_total_finished",
+                        "finishedsquarefeet50" = "area_unknown",
+                        "unitcnt" = "num_unit",
+                        "numberofstories" = "num_story",
+                        "roomcnt" = "num_room",
+                        "bathroomcnt" = "num_bathroom",
+                        "bedroomcnt" = "num_bedroom",
+                        "calculatedbathnbr" = "num_bathroom_calc",
+                        "fullbathcnt" = "num_bath",
+                        "threequarterbathnbr" = "num_75_bath",
+                        "fireplacecnt" = "num_fireplace",
+                        "poolcnt" = "num_pool",
+                        "garagecarcnt" = "num_garage",
+                        "regionidcounty" = "region_county",
+                        "regionidcity" = "region_city",
+                        "regionidzip" = "region_zip",
+                        "regionidneighborhood" = "region_neighbor",
+                        "taxvaluedollarcnt" = "tax_total",
+                        "structuretaxvaluedollarcnt" = "tax_building",
+                        "landtaxvaluedollarcnt" = "tax_land",
+                        "taxamount" = "tax_property",
+                        "assessmentyear" = "tax_year",
+                        "taxdelinquencyflag" = "tax_delinquency",
+                        "taxdelinquencyyear" = "tax_delinquency_year",
+                        "propertyzoningdesc" = "zoning_property",
+                        "propertylandusetypeid" = "zoning_landuse",
+                        "propertycountylandusecode" = "zoning_landuse_county",
+                        "fireplaceflag" = "flag_fireplace",
+                        "hashottuborspa" = "flag_tub",
+                        "buildingqualitytypeid" = "quality",
+                        "buildingclasstypeid" = "framing",
+                        "typeconstructiontypeid" = "material",
+                        "decktypeid" = "deck",
+                        "storytypeid" = "story",
+                        "heatingorsystemtypeid" = "heating",
+                        "airconditioningtypeid" = "aircon",
+                        "architecturalstyletypeid" = "architectural_style",
+                        "pooltypeid10" = "flag_spa",
+                        "pooltypeid2" = "flag_pool_spa",
+                        "pooltypeid7" = "flag_pool_tub",
+                        "fips"="county"))
+# numerical variable
+variable_numeric = c("area_firstfloor_finished",
+                     "area_base", "area_base_living",
+                     "area_garage", 
+                     "area_live_finished",
+                     "area_liveperi_finished",
+                     "area_lot",
+                     "area_patio",
+                     "area_pool",
+                     "area_shed",
+                     "area_total_calc",
+                     "area_total_finished",
+                     "area_unknown",
+                     "tax_building",
+                     "tax_land",
+                     "tax_property",
+                     "tax_total",
+                     "latitude",
+                     "longitude")
+# discrete
+variable_discrete = c("num_75_bath",
+                      "num_bath",
+                      "num_bathroom",
+                      "num_bathroom_calc",
+                      "num_bedroom",
+                      "num_fireplace",
+                      "num_garage",
+                      "num_pool",
+                      "num_room",
+                      "num_story",
+                      "num_unit")
+variable_binary = c("flag_fireplace",
+                    "flag_tub",
+                    "flag_spa",
+                    "flag_pool_spa",
+                    "flag_pool_tub",
+                    "tax_delinquency")
+
+# categorical variable
+variable_nominal = c("aircon",
+                     "architectural_style",
+                     "county",
+                     "deck",
+                     "framing",
+                     "heating",
+                     "id_parcel",
+                     "material",
+                     "region_city",
+                     "region_county",
+                     "region_neighbor",
+                     "region_zip",
+                     "story",
+                     "zoning_landuse",
+                     "zoning_landuse_county")
+variable_ordinal = c("quality")
+
+# date
+variable_date = c("tax_year",
+                  "build_year",
+                  "tax_delinquency_year",
+                  "trans_year",
+                  "trans_month",
+                  "trans_day",
+                  "trans_date",
+                  "trans_weekday")
+
+# others
+variable_unstruct = c("zoning_property")
+
+# don't understand
+variable_unknown = c('censustractandblock',
+                     'rawcensustractandblock')
+
+# Conversion
+# - convert some binary to 0, 1
+# - convert to date to int
+# - convert to numeric to double
+# - convert to discrete to int
+# - convert to categorical to character
+
+
+train[train$flag_fireplace == "", "flag_fireplace"] = 0
+train[train$flag_fireplace == "true", "flag_fireplace"] = 1
+train[train$flag_tub == "", "flag_tub"] = 0
+train[train$flag_tub == "true", "flag_tub"] = 1
+train[train$tax_delinquency == "", "tax_delinquency"] = 0
+train[train$tax_delinquency == "Y", "tax_delinquency"] = 1
+# convert to date to int
+train[,variable_date] = sapply(train[,variable_date], as.character)
+# convert to numeric to double
+train[,variable_numeric] = sapply(train[,variable_numeric], as.numeric)
+# convert to discrete to int
+train[,c(variable_discrete, variable_binary)] = sapply(train[,c(variable_discrete, variable_binary)], as.integer)
+# convert to categorical to character
+train[,c(variable_nominal, variable_ordinal)] = sapply(train[,c(variable_nominal, variable_ordinal)], as.character)
+
+#drop  the redundant value
+train <- train[, !(names(train) %in% c("num_bath","num_bathroom_calc","region_county","tax_year"))]
+
+#deleting missing value
+num.NA <- sort(colSums(sapply(train, is.na)))
+remain.col <- names(num.NA)[which(num.NA <= 0.8 * dim(train)[1])] # 
+train <- train[,remain.col]
+####################################################################################
+
+#2. missing value imputation
+check.na <- function(train){
+mis.col <- colSums(is.na(train))
+mis.col <- mis.col[mis.col>0]
+return(mis.col)
+}
+
+##(1) handle those have relative small missing value -> tax/total, tax_land/ tax_property
+ 
+train[which(is.na(train$tax_total)),"tax_total"] <- train[which(is.na(train$tax_total)),"tax_property"]/
+        quantile(train$tax_property/train$tax_total, 0.5, na.rm = T)
+
+train[which(is.na(train$tax_property)),"tax_property"] <- train[which(is.na(train$tax_property)),"tax_total"]*
+  quantile(train$tax_property/train$tax_total, 0.5, na.rm = T)
+
+train[which(is.na(train$tax_land)),"tax_land"] <- train[which(is.na(train$tax_land)),"tax_total"]*
+  quantile(train$tax_land/train$tax_total, 0.5, na.rm = T)
+
+train[which(is.na(train$tax_building)),"tax_building"] <- train[which(is.na(train$tax_building)),"tax_total"]-
+  train[which(is.na(train$tax_building)),"tax_land"]
+check.na(train)
+
+#2. then impute  region_zip/region_neighbor/region_city based on latitude/longtitude
+
+#actually we might just delete region neighbor, because  the missing value does  not contain 
+#any information, and we have  to bother to impute it
+
+with(train,t.test(logerror~ is.na(region_neighbor)))
+
+# p-value is 0.07, we  can accept the  null hypothesis, region_neighbor does not contain info
+#for those who are interested, take a look at how to find the nearest datapoint
+#https://stackoverflow.com/questions/21977720/r-finding-closest-neighboring-point-and-number-of-neighbors-within-a-given-rad
+
+geo.df <- train[,c("latitude","longitude","region_zip","region_city")]
+
+library(sp)
+library(rgeos)
+
+Impute.Zip<- function(row,search.range=1000){
+    geo.df.trunc <-subset(geo.df, abs(geo.df$longitude + geo.df$latitude -
+                                                          unlist(row["longitude"])-unlist(row["latitude"]))<search.range)
+    
+    coordinates(geo.df.trunc) <- ~longitude+latitude
+    d <- gDistance(geo.df.trunc, byid=T)
+    k = 2
+    min.d <- apply(d, 1, function(x) order(x, decreasing=F)[k])
+    neighbor <- min.d[rownames(row)]
+    while(is.na(geo.df.trunc[neighbor,"region_zip"]$region_zip)){
+      k = k + 1
+      min.d <- apply(d, 1, function(x) order(x, decreasing=F)[k])
+      neighbor <- min.d[rownames(row)]
+      
+    }
+    return(geo.df.trunc[neighbor,"region_zip"]$region_zip)
+}
+
+na.zip.rowname <- which(is.na(train$region_zip))
+
+for (i in na.zip.rowname){
+  row <-  geo.df[i,]
+  geo.df[i,"region_zip"] = Impute.Zip(row)
+}
+
+#similarly, impute city
+
+Impute.city<- function(row,search.range=1000){
+  geo.df.trunc <-subset(geo.df, abs(geo.df$longitude + geo.df$latitude -
+                                      unlist(row["longitude"])-unlist(row["latitude"]))<search.range)
+  
+  coordinates(geo.df.trunc) <- ~longitude+latitude
+  d <- gDistance(geo.df.trunc, byid=T)
+  k = 2
+  min.d <- apply(d, 1, function(x) order(x, decreasing=F)[k])
+  neighbor <- min.d[rownames(row)]
+  while(is.na(geo.df.trunc[neighbor,"region_city"]$region_city)){
+    k = k + 1
+    min.d <- apply(d, 1, function(x) order(x, decreasing=F)[k])
+    neighbor <- min.d[rownames(row)]
+    
+  }
+  return(geo.df.trunc[neighbor,"region_city"]$region_city)
+}
+
+na.city.rowname <- which(is.na(train$region_city))
+
+count = 0
+
+for (i in na.city.rowname){
+  count = count + 1
+  print(count)
+  print(i)
+  row <-  geo.df[i,]
+  geo.df[i,"region_city"] = Impute.city(row)
+}
+
+
+train[,c("region_zip","region_city")] = geo.df[,c("region_zip","region_city")]
+train <- train[,!names(train) != "region_neighbor"]
+
+#delete censustractandblock, region_neighbor -> do not have explain power
+
+train <- train[,!names(train) %in%c("X.1","X","censustractandblock","region_neighbor")]
+check.na(train)
+names(train)
+plot(train$area_lot,train$area_lot)
+
+#reduandant variable, delete area_live_finished
+train <- train[,!names(train) == "area_live_finished"]
+
+#fisrt handle  some simple one, we create a new level to indicate missing value
+
+train$aircon <- ifelse(is.na(train$aircon),"missing",train$aircon)
+train$num_garage <- ifelse(is.na(train$num_garage),"missing",train$num_garage)
+train$area_garage <- ifelse(is.na(train$area_garage),"missing",train$area_garage)
+train$heating<- ifelse(is.na(train$heating),"missing",train$heating)
+train$num_story<- ifelse(is.na(train$num_story),"missing",train$num_story)
+train$quality<- ifelse(is.na(train$quality),"missing",train$quality)
+train$build_year<- ifelse(is.na(train$build_year),"missing",train$build_year)
+check.na(train)
+
+# then let us impute the remaining missing value using library(mice)
+# we have aleady got number infomation, for now, I did not see the explanation power in num_unit
+
+train <- train[,!names(train) == "num_unit"]
+library("mice")
+
+#put all the columns related to area
+
+area.col <- c("area_lot","area_total_calc","num_bedroom","num_bathroom","num_room","tax_total")
+imputed_Data <- mice(train[,area.col], m=1, maxit = 10, method = 'pmm', seed = 500)
+plot(train$area_lot,complete(imputed_Data,1)$area_lot)
+train$area_lot = complete(imputed_Data,1)$area_lot
+abline(0,1)
+
+train$area_total_calc = complete(imputed_Data,1)$area_total_calc
+
+#check missing value
+check.na(train)
+
+# here, numerical value can't contain NA
+plot(table(train$num_garage))
+
+#keep one, delete  garage_area
+train <- train[,!names(train) == "area_garage"]
+
+#delete num_story
+with(train, t.test(logerror~ is.na(num_story)))
+train <- train[,!names(train) == "num_story"]
+with(train, t.test(logerror~ is.na(num_garage)))
+train <- train[,!names(train) == "num_garage"]
+
+```
+
+##2 Feature  Engineering
+
+We seperate all the  features into  several different categories, then perform the feature engineering within categories. Here is a summary of feature engineering.
+
+####(1) Date-realted features
+
+(a) "weekend": whether the sold day is weekend
+
+(b) "Q2": whether the sold day belongs to Q2
+
+(c) "ancient level": categorize built year by cut (1940, 1995)
+
+The above  three features cover up day - week - season -year.
+
+Note: the reasons I came up with the coming three features is due to visualization result by plotting mean(error)~ category.
+
+```{r,warning=FALSE,message=FALSE}
+variable_date = c("build_year",
+                  "trans_year",
+                  "trans_month",
+                  "trans_day",
+                  "trans_date",
+                  "trans_weekday")
+
+
+# trans_weekday
+par(mfrow = c(1,1))
+boxplot(subset(train,trans_weekday == "Monday" &
+          abs(logerror)<0.145)$logerror,
+        subset(train,trans_weekday == "Tuesday" &
+                 abs(logerror)<0.145)$logerror,
+        subset(train,trans_weekday == "Wednesday" &
+                 abs(logerror)<0.145)$logerror,
+        subset(train,trans_weekday == "Thursday" &
+                 abs(logerror)<0.145)$logerror,
+        subset(train,trans_weekday == "Friday" &
+                 abs(logerror)<0.145)$logerror,
+        subset(train,trans_weekday == "Saturday" &
+                 abs(logerror)<0.145)$logerror,
+        subset(train,trans_weekday == "Sunday" &
+                 abs(logerror)<0.145)$logerror
+        )
+with(train,t.test(logerror~ trans_weekday == "Saturday"|trans_weekday == "Sunday"))
+
+#new feature 1.
+train$weekend =ifelse(train$trans_weekday== "Saturday"|train$trans_weekday == "Sunday",
+                       1,0)
+
+train$ancient.level <- ifelse(train$build_year == "missing","missing",
+                              ifelse(as.integer(train$build_year)>1995,"new",
+                                ifelse(as.integer(train$build_year)>1940,"old","ancient")))
+
+train$Q2 = with(train,ifelse(trans_month %in% c("4","5","6"),"1","0"))
+date.feature <- c("weekend","Q2","ancient.level")
+
+```
+
+
+####(2) room/area related features
+```{r,warning=FALSE,message=FALSE}
+
+plot(train$num_room,  train$num_bedroom + train$num_bathroom)
+
+with(train,t.test(abs(logerror)~ num_room >= num_bedroom + num_bathroom))
+
+#whether the number of room is larger than the sum of the number of bedroom/bathroom
+
+train$right_room <- with(train,ifelse(num_room >= num_bedroom + num_bathroom,1,0))
+
+# bedroom/ bathroom ratio
+train$bed_to_bath <- with(train,ifelse(num_bathroom == 0, 0,num_bedroom/num_bathroom))
+
+#examine the correlation to see whether the  the features are informative features
+cor(train$bed_to_bath,train$logerror)
+cor(train$bed_to_bath,abs(train$logerror))
+cor(train$num_bathroom,abs(train$logerror))
+
+#Generate  other features 
+
+train$are_per_room<- with(train,ifelse(num_room == 0, 0, area_total_calc/num_room))
+
+#dummy variable indicating whether the count of room is zero
+train$zero_room <- with(train, ifelse(num_room  ==0 ,1,0))
+
+cor(train$are_per_room,abs(train$logerror))
+cor(train$area_total_calc,abs(train$logerror))
+
+par(mfrow = c(1,1))
+
+with(train,plot(area_lot),plot(area_total_calc))
+
+room.area.feature <- c("num_room","num_bedroom","num_bathroom","right_room","bed_to_bath",
+                       "are_per_room","zero_room","area_total_calc")
+
+
+```
+
+
+###(3) facility realted features
+```{r,warning=FALSE,message=FALSE}
+table(train$aircon)
+by(train,train$aircon,function(x){mean(x$logerror)})
+
+#collapse categorical features with too many levels
+#rebuild level based on mean  log_error
+train$new.aircon = with(train,ifelse(aircon=="missing",aircon,
+                                ifelse(aircon=="5"|aircon=="13","5/13",
+                                  ifelse(aircon=="11","11","1/3/9"))))
+
+table(train$heating)
+
+by(train,train$heating,function(x){mean(x$logerror)})
+
+# capllase heating's level to new heating
+train$new.heating = with(train,ifelse(heating == "missing",heating,
+                                  ifelse(heating %in% c("10","11","12","13","14","20","24"),"neg",
+                                         ifelse(heating %in% c("6","7"),"6/7","2/1/18"))))
+
+#Create new level to indicate whether the categorical variavle is missing
+train$missing.heating <- with(train,ifelse(heating == "missing",1,0))
+train$missing.aircon <- with(train,ifelse(aircon == "missing",1,0))
+
+facility.feature <- c("flag_tub","flag_fireplace","missing.aircon","new.heating")
+
+
+```
+
+###(4) tax realted features
+```{r,warning=FALSE,message=FALSE}
+
+with(train,cor(tax_delinquency,logerror))
+
+# Create tax percentage indicating the percentage of tax paid  
+train$tax.perc <- train$tax_property/ train$tax_total
+with(train,cor(tax.perc,logerror)) 
+train$right.tax <-ifelse(train$tax.perc < 0.1,1,0)
+train$build.to.total <- train$tax_building/train$tax_total
+with(train,cor(build.to.total,logerror)) 
+train$tax.per.area <-  train$tax_property/train$area_total_calc
+tax.feature <- c("tax_delinquency","tax_total","tax_property","tax_land","right.tax","tax.per.area","build.to.total","tax.perc")
+
+```
+
+###(5)Overall  evaluation  feature(Collapse quality )
+```{r,warning=FALSE,message=FALSE}
+quality.error <- by(train,train$quality, function(x){mean(x$logerror)})
+table(train$quality) 
+
+#collapse quality features based on their  influence  on response
+train$new.quality <- with(train,ifelse(quality=="missing",quality,
+                                ifelse(quality %in% c("12","7","11"),"12-7-11",
+                                ifelse(quality %in% c("4","1"), "4-1","6-8-10")
+                                       )
+  
+))
+
+quality.feature <- c("new.quality")
+
+```
+
+###(6) geometry related feature 
+```{r,warning=FALSE,message=FALSE}
+
+zip.num <- by(train, train$region_zip, function(x) nrow(x))
+train$zip.num <- zip.num[train$region_zip]
+
+zip.area  <- by(train, train$region_zip, function(x) 
+{abs((max(x$longitude) - min(x$longitude))*(max(x$latitude) - min(x$latitude)))})
+train$zip.area <- zip.area[train$region_zip]
+
+zip.density <- ifelse(zip.area  == 0 , 0 ,zip.num/zip.area)
+zip.density.accuracy <- ifelse(zip.num>50,1,0)
+zip.density.revised  <- zip.density*zip.density.accuracy
+train$zip.density.revised <- zip.density.revised[train$region_zip]
+
+plot(density(zip.density))
+plot(zip.density)
+train$zip.density <- zip.density[train$region_zip]
+with(train,cor(zip.density,logerror))
+with(train,cor(zip.density,abs(logerror)))
+train$zip.density <- zip.density[train$region_zip]
+
+##
+city.zip <- by(train,train$region_city, function(x){length(unique(x$region_zip))})
+train$zip.per.city <- city.zip[train$region_city]
+with(train,cor(zip.per.city ,logerror))
+
+city.area <- by(train, train$region_city, function(x){abs((max(x$longitude) - min(x$longitude))*(max(x$latitude) - min(x$latitude)))})
+
+city.num  <- by(train, train$region_city, function(x) nrow(x))
+city.density <- city.area/city.num
+train$city.density <- city.density[train$region_city]
+with(train,cor(city.density ,abs(logerror)))
+train$county6111 <- with(train, ifelse(county == "6111",1,0))
+####SELECT features 
+geo.feature<- c("county6111","zip.density.revised")
+
+```
+
+## build linear model
+
+Here, we do not list every linear model built. Instead, we just give an example to show the basic idea of how to transform features using residual diagnosis.
+
+```{r,warning=FALSE,message=FALSE}
+selected.feature <- c("logerror",geo.feature,quality.feature,tax.feature,facility.feature,room.area.feature,date.feature)
+reg.df <- train[,selected.feature]
+
+full.model <- lm(logerror~.,data = reg.df)
+summary(full.model)
+
+```
+
+Then let us start the model selection using lasso regression.
+```{r,warning=FALSE,message=FALSE}
+library(glmnet)
+ind = model.matrix(~.,reg.df[,-1])
+dep = reg.df$logerror
+fit <- glmnet(x=ind, y=dep)
+plot(fit, xvar = "lambda", label = T)
+
+cvfit <- cv.glmnet(ind, dep)
+cvfit$lambda.min 
+plot(cvfit)
+
+x = coef(cvfit, s = "lambda.min")
+x
+
+```
+
+We can  see lasso regression did not really help us choose some features. 
+
+However, we want to use residual plot to seek for new opportunies to improve the mdoel. I will just give an example for the feature bedroom to bathroom rate.
+
+After  performing the square root transfromation, the residual plot will look better. And we trained the model agian,  the adjusted R-square does improve as well.
+
+Then, for each feature, we tried to perform the some transformation, also include  some  intersection terms. 
+
+After trying different transformations  and intersactions, I showed the best result bewlow.
+
+```{r,warning=FALSE,message=FALSE}
+mod <- lm(logerror~.-zip.density.revised +I((train$zip.density.revised)^(1/18))
+           -are_per_room + I(are_per_room^(1/15))
+           -county6111-new.quality
+           #-tax_land +I(tax_land^(1/2))
+           -tax_property + I(tax_property^(1/60))
+           -num_room 
+           -bed_to_bath + I((bed_to_bath)^(1/2))
+           -tax.per.area + I(tax.per.area^(1/50))
+           -flag_fireplace
+           -missing.aircon 
+           -tax.perc + I(tax.perc^(1/12))
+           -right.tax  
+           + right.tax:I(tax_land^(1/3))
+           +I(build.to.total^(1/60))
+          + flag_tub : new.heating
+          +right_room : zero_room
+          -flag_tub
+          +Q2:weekend
+
+           ,data = reg.df)
+summary(mod)
+
+```
